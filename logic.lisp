@@ -24,9 +24,11 @@
         (if (and (peek) (peek? #\Newline))
             (progn (incf lines) (discard))))
 
-    (defun expected (s)
+    (defun expected (e &optional (f nil))
         (close-input)
-        (error "Expected `~A' on line ~D" s lines))
+        (if f
+            (error "Expected `~A' on line ~D. Found `~A' instead." e lines f)
+            (error "Expected `~A' on line ~D" e lines)))
 
     (defun reserved (stream char)
       "Catch any macro character reads as parse errors."
@@ -72,8 +74,9 @@
 (defun p-assertion ()
   "<assertion> ::= <symbol> is <symbol> [and <symbol>]+."
   (let ((obj (next)))
-    (if (not (eq (next) 'is))
-        (expected "is"))
+    (if (not (next? 'is))
+        (expected "is" (next)))
+    (next)
     (let ((fact (next)) (form nil))
         (if (next? 'and)
             (setq form `(assertion ',obj ',fact ,@(loop while (next? 'and) 
@@ -81,18 +84,20 @@
                                                         collect `',(next))))
             (setq form `(assertion ',obj ',fact)))
         (if (not (peek? #\.))
-            (expected "."))
+            (expected "." (peek)))
         (discard)
         form)))
 
-(defun p-question-and (obj)
-  "and <symbol> [and <symbol>]+?"
-  (next) ; skip 'and'
+(defun p-question-collect (obj)
+  "[and <symbol>]+?
+   Collects questions as sub lists into a super list."
   (let ((fact (next)))
     (if (next? 'and)
-       `((question ',obj ',fact) ,@(p-question-and obj))
+        (progn 
+          (next) ; skip 'and'
+          `((question ',obj ',fact) ,@(p-question-and obj)))
         (if (not (peek? #\?))
-            (expected "?")
+            (expected "?" (peek))
             (progn
                 (discard)
                 `((question ',obj ',fact)))))))
@@ -100,15 +105,11 @@
 (defun p-question ()
   "<question> ::= is <symbol> <symbol> [and <symbol>]+?"
   (next) ; skip 'is'
-  (let ((obj (next))
-        (fact (next)))
-    (if (next? 'and)
-       `(and (question ',obj ',fact) ,@(p-question-and obj))
-        (if (not (peek? #\?))
-            (expected "?")
-            (progn
-                (discard)
-                `(question ',obj ',fact))))))
+  (let ((obj (next)))
+    (let ((questions (p-question-collect obj)))
+      (if (> (length questions) 1)
+          `(and ,@questions)
+          `(,@(car questions))))))
 
 (defun p-expr ()
   "<expr> ::= <assertion> | <question>"
