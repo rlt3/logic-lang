@@ -2,7 +2,7 @@
   "Evaluates all given expressions but returns the first given expression."
   `(funcall (lambda (e) ,@more e) ,expr))
 
-(let ((input nil) (lines 1) (lookahead nil))
+(let ((input nil) (lines 1) (lookahead nil) (reserved-chars nil))
     (defun open-input (source)
         (setf input (open source :if-does-not-exist nil))
         (setf lines 1)
@@ -17,8 +17,11 @@
     (defun peek ()
         (peek-char t input nil nil))
 
+    (defun peek? (c)
+        (char= (peek) c))
+
     (defun discard-newline ()
-        (if (and (peek) (char= (peek) #\Newline))
+        (if (and (peek) (peek? #\Newline))
             (progn (incf lines) (discard))))
 
     (defun expected (s)
@@ -26,12 +29,19 @@
         (error "Expected `~A' on line ~D" s lines))
 
     (defun reserved (stream char)
-      "Catch any macro character reads as parse errors. Setting macro 
-      characters tells the read|peek|read-char suite to treat that char as a
-      delimiter."
+      "Catch any macro character reads as parse errors."
         (declare (ignore stream))
         (close-input)
         (error "Unexpected symbol `~S' on line ~D" char lines))
+
+    (defun reserved? (c)
+      (if (find c reserved-chars :test #'char=) t nil))
+
+    (defun with-reserved (&rest chars)
+      "Setting macro characters tells the read|peek|read-char suite to treat
+      that char as a delimiter."
+      (setf reserved-chars chars)
+      (mapcar #'(lambda (c) (set-macro-character c 'reserved)) chars))
 
     (defun discard ()
       "Discard next char. Look ahead and discard any newlines as well because
@@ -52,32 +62,53 @@
     (defun next? (sym)
       "Test the lookahead against `sym'. If there's no lookahead, set it as
       the next symbol read from the input buffer."
-      (if (not lookahead)
-          (setq lookahead (read input nil nil)))
-      (eq lookahead sym)))
+      (if (reserved? (peek))
+          nil
+          (progn
+              (if (not lookahead)
+                  (setq lookahead (read input nil nil)))
+              (eq lookahead sym)))))
 
 (defun p-assertion ()
-  "<assertion> ::= <symbol> is <symbol>."
+  "<assertion> ::= <symbol> is <symbol> [and <symbol>]+."
   (let ((obj (next)))
     (if (not (eq (next) 'is))
         (expected "is"))
-    (let ((fact (next)))
-        (if (not (char= (peek) #\.))
+    (let ((fact (next)) (form nil))
+        (if (next? 'and)
+            (setq form `(assertion ',obj ',fact ,@(loop while (next? 'and) 
+                                                        do (next) ; skip 'and'
+                                                        collect `',(next))))
+            (setq form `(assertion ',obj ',fact)))
+        (if (not (peek? #\.))
             (expected "."))
-        (progn
-            (discard)
-            `(assertion ',obj ',fact)))))
+        (discard)
+        form)))
+
+(defun p-question-and (obj)
+  "and <symbol> [and <symbol>]+?"
+  (next) ; skip 'and'
+  (let ((fact (next)))
+    (if (next? 'and)
+       `((question ',obj ',fact) ,@(p-question-and obj))
+        (if (not (peek? #\?))
+            (expected "?")
+            (progn
+                (discard)
+                `((question ',obj ',fact)))))))
 
 (defun p-question ()
-  "<question> ::= is <symbol> <symbol>?"
+  "<question> ::= is <symbol> <symbol> [and <symbol>]+?"
   (next) ; skip 'is'
   (let ((obj (next))
         (fact (next)))
-    (if (not (char= (peek) #\?))
-       (expected "?"))
-    (progn
-        (discard)
-        `(question ',obj ',fact))))
+    (if (next? 'and)
+       `(and (question ',obj ',fact) ,@(p-question-and obj))
+        (if (not (peek? #\?))
+            (expected "?")
+            (progn
+                (discard)
+                `(question ',obj ',fact))))))
 
 (defun p-expr ()
   "<expr> ::= <assertion> | <question>"
@@ -87,13 +118,43 @@
 (defun parse (source)
   "Parse an input file into an AST."
   (let ((*readtable* (copy-readtable)))
-    (set-macro-character #\Newline 'reserved)
-    (set-macro-character #\. 'reserved)
-    (set-macro-character #\; 'reserved)
-    (set-macro-character #\? 'reserved)
+    (with-reserved #\Newline #\. #\; #\?)
     (open-input source)
     (return-first
       (loop
         while (peek)
         collect (p-expr))
       (close-input))))
+
+(defvar *objects* (make-hash-table))
+(defvar *facts* (make-hash-table))
+
+(defmacro key-exists? (hash key)
+  `(not (eq (gethash ,key ,hash) nil)))
+
+(defmacro get-object (name)
+  `(gethash ,name *objects*))
+
+(defun object? (name)
+  (key-exists? *objects* name))
+
+(defun make-object (name)
+  (setf (get-object name) (cons name nil)))
+
+(defun object-add-fact (name fact)
+  (setf (get-object name) (nconc (get-object name) `(,fact))))
+
+(defun assertion (obj fact &rest facts)
+  (if (not (object? obj))
+      (make-object obj))
+  (object-add-fact obj fact)
+  (if facts (mapcar #'(lambda (f) (object-add-fact obj f)) facts))
+  t)
+
+(defun question (object fact)
+  (if (find fact (get-object object) :test #'eq)
+      t
+      nil))
+
+(defmacro run (source)
+  `(progn ,@(eval source)))
