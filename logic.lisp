@@ -2,12 +2,11 @@
   "Evaluates all given expressions but returns the first given expression."
   `(funcall (lambda (e) ,@more e) ,expr))
 
-(let ((input nil)
-      (lines 1))
-
+(let ((input nil) (lines 1) (lookahead nil))
     (defun open-input (source)
         (setf input (open source :if-does-not-exist nil))
         (setf lines 1)
+        (setf lookahead nil)
         t)
 
     (defun close-input ()
@@ -15,18 +14,12 @@
         (setf input nil)
         t)
 
-    (defun ++line-number ()
-        (incf lines))
-
-    (defun line-number ()
-        lines)
-
     (defun peek ()
         (peek-char t input nil nil))
 
     (defun discard-newline ()
         (if (and (peek) (char= (peek) #\Newline))
-            (progn (++line-number) (discard))))
+            (progn (incf lines) (discard))))
 
     (defun expected (s)
         (close-input)
@@ -42,29 +35,28 @@
 
     (defun discard ()
       "Discard next char. Look ahead and discard any newlines as well because
-       newlines are often right after a discarded char."
+      newlines are often right after a discarded char."
         (read-char input nil nil)
         (discard-newline))
 
     (defun next ()
-      "Get the next symbol from input. Discarding any newlines come across 
-      during regular expression expression."
-        (discard-newline)
-        (read input nil nil))
+      "Get the next symbol from input. If there's a lookahead symbol, return
+      that and discard it. Otherwise read next symbol from the buffer."
+      (discard-newline)
+      (if lookahead
+          (return-first
+              lookahead
+              (setq lookahead nil))
+          (read input nil nil)))
 
     (defun next? (sym)
-      "Read the next symbol as `look' and test if `sym' is equal to `look'. 
-      Then put the read symbol back into the input buffer."
-        (let ((look (read input nil nil)))
-            (mapcar #'(lambda (c) (unread-char c input))
-                     (coerce (reverse 
-                               (concatenate ; with extra delimiting whitespace
-                                'string (symbol-name look) " "))
-                             'list))
-            (eq look sym))))
+      "Test the lookahead against `sym'. If there's no lookahead, set it as
+      the next symbol read from the input buffer."
+      (if (not lookahead)
+          (setq lookahead (read input nil nil)))
+      (eq lookahead sym)))
 
-
-(defun assertion ()
+(defun p-assertion ()
   "<assertion> ::= <symbol> is <symbol>."
   (let ((obj (next)))
     (if (not (eq (next) 'is))
@@ -74,9 +66,9 @@
             (expected "."))
         (progn
             (discard)
-            `(is= ,obj ,fact)))))
+            `(assertion ',obj ',fact)))))
 
-(defun question ()
+(defun p-question ()
   "<question> ::= is <symbol> <symbol>?"
   (next) ; skip 'is'
   (let ((obj (next))
@@ -85,14 +77,15 @@
        (expected "?"))
     (progn
         (discard)
-        `(is? ,obj ,fact))))
+        `(question ',obj ',fact))))
 
-(defun expr ()
+(defun p-expr ()
   "<expr> ::= <assertion> | <question>"
-  (cond ((next? 'is) (question))
-        (t (assertion))))
+  (cond ((next? 'is) (p-question))
+        (t (p-assertion))))
 
 (defun parse (source)
+  "Parse an input file into an AST."
   (let ((*readtable* (copy-readtable)))
     (set-macro-character #\Newline 'reserved)
     (set-macro-character #\. 'reserved)
@@ -102,5 +95,5 @@
     (return-first
       (loop
         while (peek)
-        collect (expr))
+        collect (p-expr))
       (close-input))))
